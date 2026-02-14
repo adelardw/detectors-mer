@@ -54,6 +54,7 @@ def train(
     data_transforms = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
     all_datasets = []
@@ -95,14 +96,14 @@ def train(
         'au_ckpt_path':  './src/backbones/MEGraphAU/checkpoints/MEFARG_swin_tiny_BP4D_fold1.pth',
         'phys_ckpt_path': './src/backbones/rPPGToolbox/final_model_release/PURE_PhysNet_DiffNormalized.pth',
         'num_classes':  2,
-        'dropout':  0.1,
+        'dropout':  0.3,
         "videomae_model_name": 'MCG-NJU/videomae-base',
         "num_au_classes": 12,
         "lora_cfg": {
             "inference_mode": False,
-            "r": 8,
+            "r": 16,
             "lora_alpha": 32,
-            "lora_dropout": 0.1,
+            "lora_dropout": 0.15,
             "target_modules": ["query", "value", "key"]
         }
     })

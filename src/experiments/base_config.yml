@@ -9,7 +9,7 @@ model_params:
   num_au_classes: 12
   lora_cfg:
     inference_mode: false
-    r: 8
+    r: 16
     lora_alpha: 32
     lora_dropout: 0.1
     target_modules:

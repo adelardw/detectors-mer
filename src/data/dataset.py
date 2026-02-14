@@ -272,7 +272,7 @@ if __name__ == "__main__":
     # print(f"Labels: {labels}")
 
 
-    root_path = "../datasets/ff++_videous_out"
+    root_path = "../datasets/dfd"
 
 
     full_dataset = VideoFolderDataset(root_path, transform=data_transforms)
