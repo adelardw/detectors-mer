@@ -40,8 +40,8 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         self.val_rec = torchmetrics.Recall(task="multiclass", num_classes=num_classes, average="macro")
         self.val_auc = torchmetrics.AUROC(task="multiclass", num_classes=num_classes)
 
-    def forward(self, x):
-        return self.model(x)
+    def forward(self, x, *args, **kwargs):
+        return self.model(x, *args, **kwargs)
 
     def training_step(self, batch, batch_idx):
         x, y = batch
