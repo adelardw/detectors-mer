@@ -1,7 +1,5 @@
 import os
-# Лечим фрагментацию памяти
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-
 import cv2
 import torch
 import torch.nn as nn
@@ -9,133 +7,116 @@ import numpy as np
 import typer
 import gc
 from PIL import Image 
-from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.image import show_cam_on_image, scale_cam_image
+from pytorch_grad_cam import LayerCAM
+from pytorch_grad_cam.utils.image import show_cam_on_image
 from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from torchvision import transforms
 from omegaconf import OmegaConf
-
 from src.models.rppg_p_fau_lightning import FauRPPGDeepFakeRecognizer
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
 
-# --- 1. ОБЕРТКИ ---
+# =========================================================================
+# 1. ТРАНСФОРМЕРЫ РАЗМЕРНОСТЕЙ
+# =========================================================================
+
+def swin_reshape_transform(tensor):
+    """Для FAU (Swin): (B, Tokens, Dim) -> (B, Dim, H, W)"""
+    if isinstance(tensor, tuple): tensor = tensor[0]
+    if len(tensor.shape) == 4:
+        return tensor.permute(0, 3, 1, 2)
+    N, Num_Tokens, Dim = tensor.shape
+    H = W = int(np.sqrt(Num_Tokens))
+    if H * W != Num_Tokens:
+        tensor = tensor[:, :H*W, :]
+    result = tensor.transpose(1, 2).reshape(N, Dim, H, W)
+    return result
+
+def rppg_reshape_transform(tensor):
+    """
+    Для PhysNet:
+    Вход: (Batch, Channels, Time, H, W) -> например (1, 64, 128, 8, 8)
+    Выход: (Batch*Time, Channels, H, W) -> например (128, 64, 8, 8)
+    """
+    if isinstance(tensor, tuple): tensor = tensor[0]
+    
+    # PhysNet выдает 5D тензор
+    if len(tensor.shape) == 5:
+        B, C, T, H, W = tensor.shape
+        # Перемещаем время к батчу: (B, T, C, H, W)
+        result = tensor.permute(0, 2, 1, 3, 4)
+        # Объединяем: (B*T, C, H, W)
+        result = result.reshape(B*T, C, H, W)
+        return result
+        
+    return tensor
+
+# =========================================================================
+# 2. ОБЕРТКА
+# =========================================================================
+
 class GradCAMModelWrapper(nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model
     def forward(self, x):
-        return self.model(x, return_info=False)
+        # x: (128, 3, 224, 224) -> превращаем в видео (1, 3, 128, 224, 224)
+        x_video = x.unsqueeze(0).permute(0, 2, 1, 3, 4)
+        logits = self.model(x_video, return_info=False)
+        return logits
 
-class VideoGradCAM(GradCAM):
-    def get_target_width_height(self, input_tensor):
-        if len(input_tensor.shape) == 5:
-            return input_tensor.shape[-1], input_tensor.shape[-2]
-        return super().get_target_width_height(input_tensor)
+# =========================================================================
+# 3. ВИЗУАЛИЗАТОР
+# =========================================================================
 
-    def compute_cam_per_layer(self, input_tensor, targets, eigen_smooth):
-        activations_list = [a.cpu().data.numpy() for a in self.activations_and_grads.activations]
-        grads_list = [g.cpu().data.numpy() for g in self.activations_and_grads.gradients]
-        target_size = self.get_target_width_height(input_tensor)
-
-        cam_per_target_layer = []
-        for i in range(len(activations_list)):
-            target_layer = self.target_layers[i]
-            layer_activations = activations_list[i]
-            layer_grads = grads_list[i]
-
-            cam = self.get_cam_image(input_tensor, target_layer, targets, layer_activations, layer_grads, eigen_smooth)
-            cam = np.maximum(cam, 0)
-            cam = cam.astype(np.float32)
-
-            if len(cam.shape) == 4: cam = cam[0]
-            
-            if len(cam.shape) == 3: # VIDEO
-                scaled_video = []
-                for t in range(cam.shape[0]):
-                    frame = cv2.resize(cam[t], target_size)
-                    scaled_video.append(frame)
-                scaled = np.stack(scaled_video, axis=0)[None, ...] 
-                cam_per_target_layer.append(scaled)
-            else: # IMAGE
-                scaled = cv2.resize(cam, target_size)
-                cam_per_target_layer.append(scaled[None, None, ...])
-
-        return cam_per_target_layer
-
-# --- 2. РЕШЕЙПЕРЫ ---
-def transformer_reshape_transform(tensor, width=14, height=14):
-    if isinstance(tensor, tuple): tensor = tensor[0]
-    if len(tensor.shape) == 4: return tensor 
-    
-    num_tokens = tensor.shape[1]
-    spatial = width * height
-    if num_tokens % spatial != 0: tensor = tensor[:, 1:, :]
-
-    B, Seq, Dim = tensor.shape
-    temporal = Seq // spatial
-    valid_len = temporal * spatial
-    if Seq > valid_len: tensor = tensor[:, :valid_len, :]
-    
-    result = tensor.reshape(B, temporal, spatial, Dim)
-    side = int(np.sqrt(spatial))
-    result = result.permute(0, 3, 1, 2).reshape(B, Dim, temporal, side, side)
-    return result
-
-def swin_reshape_transform(tensor, width=7, height=7):
-    if isinstance(tensor, tuple): tensor = tensor[0]
-    B_times_T, num_tokens, Dim = tensor.shape
-    side = int(np.sqrt(num_tokens))
-    result = tensor.permute(0, 2, 1).reshape(B_times_T, Dim, side, side)
-    result = result.unsqueeze(0).permute(0, 2, 1, 3, 4)
-    return result
-
-# --- 3. ВИЗУАЛИЗАТОР ---
 class Visualizer:
     def draw_graph_strip(self, data, title, color, width, height):
         fig = plt.figure(figsize=(width/100, height/100), dpi=100)
         canvas = FigureCanvas(fig)
         ax = fig.gca()
-        
         if len(data) > 1:
             d_arr = np.array(data)
-            std_val = d_arr.std() if d_arr.std() > 1e-6 else 1e-6
-            norm_data = (d_arr - d_arr.mean()) / std_val
+            mn, mx = d_arr.min(), d_arr.max()
+            norm_data = (d_arr - mn) / (mx - mn + 1e-6)
         else:
             norm_data = data
-            
         ax.plot(norm_data, color=color, linewidth=2)
         ax.set_facecolor('black')
         ax.axis('off')
         ax.set_xlim(0, len(data) if len(data) > 0 else 1)
-        ax.text(0.01, 0.85, title, transform=ax.transAxes, color='white', fontsize=12, weight='bold')
-
+        ax.set_ylim(-0.1, 1.1)
+        ax.text(0.01, 0.8, title, transform=ax.transAxes, color='white', fontsize=12, weight='bold')
         fig.patch.set_facecolor('black')
         plt.tight_layout(pad=0)
-        
         canvas.draw()
         img = np.asarray(canvas.buffer_rgba())
         img = img.astype(np.uint8)[:, :, :3]
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         plt.close(fig)
-        
         if img.shape[0] != height or img.shape[1] != width:
             img = cv2.resize(img, (width, height))
         return img
 
+# =========================================================================
+# 4. MAIN
+# =========================================================================
+
 @app.command()
 def process(
     video_path: str = typer.Option(..., "-i", help="Input video"),
-    output_prefix: str = typer.Option("viz_result", "-o", help="Prefix"),
-    ckpt_path: str = typer.Option(..., "-c", help="Checkpoint"),
-    config_path: str = typer.Option("config.yaml", "-cfg", help="Config"),
-    device: str = typer.Option("cuda", help="cuda/mps/cpu")
+    output_path: str = typer.Option("viz_rppg.avi", "-o", help="Output video"),
+    ckpt_path: str = typer.Option(..., "-c", help="Model checkpoint"),
+    config_path: str = typer.Option("config.yaml", "-cfg", help="Config file"),
+    device: str = typer.Option("cuda", help="Device"),
+    use_rppg: bool = typer.Option(False, "--use-rppg", help="Visualize PhysNet (rPPG) attention"),
+    target_stage: int = typer.Option(3, help="For FAU only: Swin stage (1-4)")
 ):
     torch.set_grad_enabled(True)
     
-    print(f"Loading model from {ckpt_path}...")
+    # --- Load ---
+    print(f"Loading checkpoint: {ckpt_path}")
     file_config = OmegaConf.load(config_path)
     defaults = {'backbone_fau': 'swin_transformer_tiny', 'num_frames': 128, 'num_classes': 2, 'dropout': 0.1, 'videomae_model_name': 'MCG-NJU/videomae-base', 'num_au_classes': 12, 'lora_cfg': None}
     model_params = {**defaults, **OmegaConf.to_container(file_config.model_params, resolve=True)}
@@ -146,122 +127,115 @@ def process(
     lit_model.to(device)
     
     cam_model = GradCAMModelWrapper(lit_model.model)
-    target_mae = lit_model.model.videomae.encoder.layer[-1]
-    try: target_fau = lit_model.model.au_encoder.backbone.layers[-1]
-    except: target_fau = lit_model.model.au_proj
-
-    cam_mae = VideoGradCAM(model=cam_model, target_layers=[target_mae], reshape_transform=transformer_reshape_transform)
-    cam_fau = VideoGradCAM(model=cam_model, target_layers=[target_fau], reshape_transform=swin_reshape_transform)
-
-    cap = cv2.VideoCapture(video_path)
-    orig_fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    out_mae, out_fau = None, None
+    # --- Layer Selection ---
+    if use_rppg:
+        print(">>> MODE: Visualizing PhysNet (rPPG)")
+        # В PhysNet upsample2 - это последний слой перед пулингом.
+        # Он возвращает размерность времени T (в отличие от других слоев), 
+        # поэтому идеально подходит для покадровой визуализации.
+        try:
+            target_layer = lit_model.model.phys_encoder.upsample2
+            print("Targeting: phys_encoder.upsample2")
+        except AttributeError:
+            print("Warning: 'upsample2' not found, using last child.")
+            target_layer = list(lit_model.model.phys_encoder.children())[-1]
+            
+        reshape_func = rppg_reshape_transform
+    else:
+        print(">>> MODE: Visualizing FAU (Swin)")
+        try:
+            layer_idx = target_stage - 1 
+            target_layer = lit_model.model.au_encoder.backbone.layers[layer_idx]
+            if hasattr(target_layer, 'blocks'):
+                target_layer = target_layer.blocks[-1]
+                if hasattr(target_layer, 'norm1'):
+                    target_layer = target_layer.norm1
+        except:
+            target_layer = list(lit_model.model.au_encoder.backbone.children())[-1]
+        reshape_func = swin_reshape_transform
+
+    cam = LayerCAM(model=cam_model, target_layers=[target_layer], reshape_transform=reshape_func)
+
+    # --- Processing ---
+    cap = cv2.VideoCapture(video_path)
+    orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-    
     viz = Visualizer()
-    rppg_buffer = []
+    BATCH_SIZE = 128
+    
     frames_buffer = []
     raw_buffer = []
-    BATCH_SIZE = 128 
-    GRAPH_HEIGHT = 150
+    rppg_buffer = []
+    writer = None
 
-    def process_and_write_batch(frames_tens, raw_frames, rppg_buf, w_mae, w_fau):
-        real_len = len(frames_tens)
-        padded_frames = frames_tens.copy()
-        if real_len < 128:
-            while len(padded_frames) < 128:
-                needed = 128 - len(padded_frames)
-                padded_frames.extend(frames_tens[:needed])
-        
-        input_tensor = torch.stack(padded_frames).permute(1,0,2,3).unsqueeze(0).to(device)
+    def process_chunk(frames_t, raw_frames, rppg_hist, vid_writer):
+        input_tensor = torch.stack(frames_t).to(device) 
         input_tensor.requires_grad = True
-            
+        
+        # Inference
         with torch.no_grad():
-            info_out = lit_model.model(input_tensor, return_info=True) 
-            rppg_sig = info_out["rPPG"][0].cpu().numpy() 
+            video_input = input_tensor.unsqueeze(0).permute(0, 2, 1, 3, 4)
+            info_out = lit_model.model(video_input, return_info=True)
+            rppg_sig = info_out["rPPG"][0].cpu().numpy()
             probs = torch.softmax(info_out["logits"], dim=1)
-            
-            # === ФИНАЛЬНАЯ ЛОГИКА ===
-            # prob[0] -> FAKE
-            # prob[1] -> REAL
-            print(probs)
             score_real = probs[0, 1].item()
-            score_fake = probs[0, 0].item()
-            
-            if score_real > 0.5:
-                pred_cls = 1 # Смотрим, почему это REAL
-                label_text = f"REAL: {score_real:.2f}"
-                color_text = (0, 255, 0) # Зеленый
-            else:
-                pred_cls = 0 # Смотрим, почему это FAKE
-                label_text = f"FAKE: {score_fake:.2f}"
-                color_text = (0, 0, 255) # Красный
+            is_real = score_real > 0.5
+            label_text = f"REAL: {score_real:.2f}" if is_real else f"FAKE: {probs[0, 0].item():.2f}"
+            color_text = (0, 255, 0) if is_real else (0, 0, 255)
+            mode_text = "MODE: rPPG (PhysNet)" if use_rppg else "MODE: FAU (Swin)"
 
-        targets = [ClassifierOutputTarget(pred_cls)]
-        
+        # CAM
+        targets = [ClassifierOutputTarget(1 if is_real else 0)]
         with torch.amp.autocast('cuda'):
-            gray_mae = cam_mae(input_tensor=input_tensor, targets=targets)
-            if len(gray_mae.shape) == 4: gray_mae = gray_mae[0]
-        torch.cuda.empty_cache(); gc.collect()
-
-        with torch.amp.autocast('cuda'):
-            gray_fau = cam_fau(input_tensor=input_tensor, targets=targets)
-            if len(gray_fau.shape) == 4: gray_fau = gray_fau[0]
-        torch.cuda.empty_cache(); gc.collect()
-
-        frame_h, frame_w = raw_frames[0].shape[:2]
-        total_height = frame_h + GRAPH_HEIGHT
-        
-        if w_mae is None:
-            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-            w_mae = cv2.VideoWriter(f"{output_prefix}_videomae.avi", fourcc, orig_fps, (frame_w, total_height))
-            w_fau = cv2.VideoWriter(f"{output_prefix}_fau.avi", fourcc, orig_fps, (frame_w, total_height))
-
-        for i in range(real_len):
-            orig = raw_frames[i]
-            if orig.shape[:2] != (frame_h, frame_w): orig = cv2.resize(orig, (frame_w, frame_h))
+            # PhysNet вернет (1, 64, 128, 8, 8) -> reshape -> (128, 64, 8, 8)
+            grayscale_cam = cam(input_tensor=input_tensor, targets=targets)
             
-            orig_rgb = cv2.cvtColor(orig, cv2.COLOR_BGR2RGB)
-            orig_rgb_float = orig_rgb.astype(np.float32) / 255.0
-            
-            def create_vis(cam_frames, idx):
-                idx = idx if idx < len(cam_frames) else -1
-                heatmap = cam_frames[idx]
-                min_val, max_val = np.min(heatmap), np.max(heatmap)
-                if max_val > min_val:
-                    heatmap = (heatmap - min_val) / (max_val - min_val)
-                
-                heatmap = cv2.resize(heatmap, (frame_w, frame_h))
-                v = show_cam_on_image(orig_rgb_float, heatmap, use_rgb=True)
-                v = cv2.cvtColor(v, cv2.COLOR_RGB2BGR)
-                return v
-
-            vis_mae = create_vis(gray_mae, i)
-            vis_fau = create_vis(gray_fau, i)
-            
-            rppg_val = rppg_sig[i] if i < len(rppg_sig) else 0
-            rppg_buf.append(rppg_val)
-            if len(rppg_buf) > 100: rppg_buf.pop(0)
-            
-            graph_strip = viz.draw_graph_strip(rppg_buf, "rPPG Pulse", "#00ff00", width=frame_w, height=GRAPH_HEIGHT)
-            
-            for v_frame, writer in [(vis_mae, w_mae), (vis_fau, w_fau)]:
-                cv2.rectangle(v_frame, (5, 5), (300, 60), (0,0,0), -1)
-                cv2.putText(v_frame, label_text, (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color_text, 3)
-                combined = np.vstack((v_frame, graph_strip))
-                writer.write(combined)
-            
-        print(f"Batch processed ({real_len} frames).")
-        del input_tensor, gray_mae, gray_fau
+        del input_tensor, video_input
         torch.cuda.empty_cache()
-        return rppg_buf, w_mae, w_fau
+        gc.collect()
 
+        # Render
+        num_frames = len(raw_frames)
+        frame_h, frame_w = raw_frames[0].shape[:2]
+        if vid_writer is None:
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            vid_writer = cv2.VideoWriter(output_path, fourcc, orig_fps, (frame_w, frame_h + 150))
+
+        for i in range(num_frames):
+            orig = cv2.resize(raw_frames[i], (frame_w, frame_h))
+            orig_rgb = cv2.cvtColor(orig, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            
+            # Если кадров меньше, чем хитмапов (из-за паддинга), проверяем индекс
+            if i < len(grayscale_cam):
+                mask = grayscale_cam[i]
+                if np.max(mask) > 0: mask = mask / np.max(mask)
+                mask = np.power(mask, 0.7)
+            else:
+                mask = np.zeros((224, 224), dtype=np.float32)
+
+            mask_resized = cv2.resize(mask, (frame_w, frame_h))
+            vis = show_cam_on_image(orig_rgb, mask_resized, use_rgb=True)
+            vis = cv2.cvtColor(vis, cv2.COLOR_RGB2BGR)
+
+            val = rppg_sig[i] if i < len(rppg_sig) else 0
+            rppg_hist.append(val)
+            if len(rppg_hist) > 100: rppg_hist.pop(0)
+            graph_img = viz.draw_graph_strip(rppg_hist, "rPPG Pulse", "#00ff00", frame_w, 150)
+
+            cv2.rectangle(vis, (0,0), (300, 80), (0,0,0), -1)
+            cv2.putText(vis, label_text, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color_text, 2)
+            cv2.putText(vis, mode_text, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            vid_writer.write(np.vstack([vis, graph_img]))
+            
+        return rppg_hist, vid_writer
+
+    print("Starting...")
     while True:
         ret, frame = cap.read()
         if not ret: break
@@ -271,16 +245,19 @@ def process(
         raw_buffer.append(frame)
         
         if len(frames_buffer) == BATCH_SIZE:
-            rppg_buffer, out_mae, out_fau = process_and_write_batch(frames_buffer, raw_buffer, rppg_buffer, out_mae, out_fau)
+            rppg_buffer, writer = process_chunk(frames_buffer, raw_buffer, rppg_buffer, writer)
             frames_buffer, raw_buffer = [], []
             
     if len(frames_buffer) > 0:
-        rppg_buffer, out_mae, out_fau = process_and_write_batch(frames_buffer, raw_buffer, rppg_buffer, out_mae, out_fau)
+        print(f"Tail processing: {len(frames_buffer)}")
+        needed = BATCH_SIZE - len(frames_buffer)
+        frames_buffer_padded = frames_buffer.copy()
+        frames_buffer_padded.extend([frames_buffer[-1]] * needed)
+        _, writer = process_chunk(frames_buffer_padded, raw_buffer, rppg_buffer, writer)
 
     cap.release()
-    if out_mae: out_mae.release()
-    if out_fau: out_fau.release()
-    print(f"Done!")
+    if writer: writer.release()
+    print(f"Done! Saved to {output_path}")
 
 if __name__ == "__main__":
     app()

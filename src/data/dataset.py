@@ -166,6 +166,7 @@ class VideoFolderDataset(Dataset):
                 for file in files:
                     if file.lower().endswith(self.valid_extensions):
                         path = os.path.join(root, file)
+                        print(root, idx)
                         self.samples.append((path, idx))
 
         print(f"Found {len(self.samples)} videos in {root_dir}")
@@ -272,7 +273,7 @@ if __name__ == "__main__":
     # print(f"Labels: {labels}")
 
 
-    root_path = "../datasets/dfd"
+    root_path = "../datasets/ff++_videous_out"
 
 
     full_dataset = VideoFolderDataset(root_path, transform=data_transforms)
