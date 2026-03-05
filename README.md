@@ -230,3 +230,33 @@ src/backbones/rPPGToolbox/final_model_release
 ## Цитирование
 
 Если вы используете этот репозиторий, пожалуйста, ссылайтесь на страницу проекта или свяжитесь с автором напрямую, пока не будет опубликована статья или технический отчёт.
+
+
+#### Best Checkpoint
+
+| Metric Name | Metric Value |
+|---|---:|
+| Validation Accuracy | ~0.64 |
+| Validation AUC | ~0.69 |
+| Validation F1 | ~0.62 |
+| Validation Loss | ~0.65 |
+
+
+#### Validation Curves
+
+**Validation Accuracy**
+
+![Validation Accuracy](docs/val_acc.png)
+
+**Validation AUC**
+
+![Validation AUC](docs/val_auc.png)
+
+**Validation F1**
+
+![Validation F1](docs/val_f1.png)
+
+**Validation Loss**
+
+![Validation Loss](docs/val_loss.png)
+
