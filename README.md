@@ -20,6 +20,14 @@ The project is currently in an **early research stage**. The core model code is 
 
 ![MER architecture](docs/architecture.png)
 
+## DATASETS
+The model has been trained on two public deepfake datasets:
+1. FF++
+2. CelebDf
+
+Train: 1600 samples
+Validation: 200 samples
+
 ### High-level idea
 
 The model processes a video through two complementary branches:
@@ -134,6 +142,14 @@ MER — это исследовательский репозиторий для 
 ## Архитектура
 
 ![Архитектура MER](docs/architecture.png)
+
+## Датасеты
+Модель была обучена на 2 датасетах:
+1. FF++
+2. CelebDf
+
+Тренировочный набор: 1600 примеров
+Валидационный набор: 200 примеров
 
 ### Общая идея
 
