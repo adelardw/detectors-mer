@@ -5,24 +5,17 @@ model_params:
   phys_ckpt_path: ./src/backbones/rPPGToolbox/final_model_release/PURE_PhysNet_DiffNormalized.pth
   num_classes: 2
   dropout: 0.3
-  videomae_model_name: MCG-NJU/videomae-base
   num_au_classes: 12
-  lora_cfg:
-    inference_mode: false
-    r: 16
-    lora_alpha: 32
-    lora_dropout: 0.1
-    target_modules:
-    - query
-    - value
-    - key
+  embed_dim: 512
+  num_queries: 32
+  num_decoder_layers: 6
+  nhead: 8
 
 train_params:
   lr: 0.0001
   weight_decay: 0.05
   T_max: 10
   num_classes: 2
-
 
 trainer_params:
   max_epochs: 1000
