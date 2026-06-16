@@ -10,6 +10,32 @@
 
 `run.py` takes a checkpoint and a path, runs the model, and writes one JSON object per video to a JSONL file.
 
+### Environment setup
+
+Install with **uv** (recommended):
+
+```bash
+uv sync
+```
+
+…or with a plain **virtualenv + pip**:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -e .
+```
+
+Make sure a `.env` file exists (set `EXPERIMENTS_CFG_FOLDER` if you use a custom config folder).
+
+> **Backbone weights are NOT required for inference from a trained checkpoint.** A trained `.ckpt` already contains all weights (swin + ME-GraphAU + DeepFakesON-Phys), so the swin/ME-GraphAU `.pth` files are loaded only if present and the result is identical without them. You only need `bash env.sh` (below) to download backbone weights for **training from scratch**.
+
+```bash
+bash env.sh   # only for training from scratch
+```
+
+> The commands below are shown with `uv run`. If you installed into an **activated virtualenv** instead, just drop the `uv run` prefix and call `python` directly — e.g. `python run.py ...` instead of `uv run run.py ...`.
+
 **Label mapping (from the training folder names, sorted alphabetically): `fake = 0`, `real = 1`.**
 
 Run on a folder of videos (scanned recursively):
@@ -31,7 +57,26 @@ uv run run.py \
     -o prediction.jsonl
 ```
 
+The same via plain `python` (after `source .venv/bin/activate`):
+
+```bash
+python run.py \
+    -ckpt path/to/checkpoint.ckpt \
+    -d /path/to/clip.mp4 \
+    -o prediction.jsonl
+```
+
 Options: `-c` config (default `src/experiments/base_config.yml`), `-bs` batch size (default 8), `-nw` workers (default 4), `--no_face_detector` to disable the MTCNN face crop. CUDA is used automatically if available, otherwise CPU.
+
+### Web demo — player + JSON
+
+A small local web UI: drop in a video, watch it in the player, get the JSON verdict. No extra dependencies (stdlib server); the model is loaded once at startup and reuses the exact `run.py` pipeline.
+
+```bash
+uv run webapp/server.py            # or, in an activated venv: python webapp/server.py
+```
+
+Then open <http://127.0.0.1:8000> in a browser. By default it uses the delivered DF checkpoint (`experimental_results/exp_120626/best-epoch=08-val_auc=0.8485.ckpt`). Options: `-ckpt` checkpoint, `-c` config, `-p` port (default 8000), `--host`, `--no_face_detector`.
 
 Output — one JSON object per line:
 
@@ -44,6 +89,32 @@ Output — one JSON object per line:
 ## Быстрый старт — инференс (`run.py`)
 
 `run.py` принимает чекпоинт и путь, прогоняет модель и пишет по одному JSON-объекту на видео в JSONL-файл.
+
+### Настройка окружения
+
+Установка через **uv** (рекомендуется):
+
+```bash
+uv sync
+```
+
+…или через обычный **virtualenv + pip**:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -e .
+```
+
+Убедитесь, что существует файл `.env` (укажите `EXPERIMENTS_CFG_FOLDER`, если используете свою папку с конфигами).
+
+> **Веса backbone НЕ нужны для инференса по обученному чекпоинту.** Обученный `.ckpt` уже содержит все веса (swin + ME-GraphAU + DeepFakesON-Phys), поэтому файлы swin/ME-GraphAU `.pth` загружаются только при наличии, а без них результат идентичен. `bash env.sh` (ниже) нужен только для скачивания весов backbone под **обучение с нуля**.
+
+```bash
+bash env.sh   # только для обучения с нуля
+```
+
+> Команды ниже показаны с `uv run`. Если вы установили зависимости в **активированный virtualenv**, просто уберите префикс `uv run` и вызывайте `python` напрямую — например, `python run.py ...` вместо `uv run run.py ...`.
 
 **Маппинг меток (из имён папок обучения, отсортированных по алфавиту): `fake = 0`, `real = 1`.**
 
@@ -66,7 +137,26 @@ uv run run.py \
     -o prediction.jsonl
 ```
 
+То же самое через обычный `python` (после `source .venv/bin/activate`):
+
+```bash
+python run.py \
+    -ckpt path/to/checkpoint.ckpt \
+    -d /path/to/clip.mp4 \
+    -o prediction.jsonl
+```
+
 Опции: `-c` конфиг (по умолчанию `src/experiments/base_config.yml`), `-bs` размер батча (по умолчанию 8), `-nw` воркеры (по умолчанию 4), `--no_face_detector` — отключить кроп лица MTCNN. CUDA используется автоматически при наличии, иначе CPU.
+
+### Веб-демо — плеер + JSON
+
+Небольшой локальный веб-интерфейс: закидываешь видео, смотришь его в плеере, получаешь вердикт в JSON. Без дополнительных зависимостей (сервер на stdlib); модель грузится один раз при старте и переиспользует тот же пайплайн, что и `run.py`.
+
+```bash
+uv run webapp/server.py            # или, в активированном venv: python webapp/server.py
+```
+
+Затем открой <http://127.0.0.1:8000> в браузере. По умолчанию используется отдаваемый DF-чекпоинт (`experimental_results/exp_120626/best-epoch=08-val_auc=0.8485.ckpt`). Опции: `-ckpt` чекпоинт, `-c` конфиг, `-p` порт (по умолчанию 8000), `--host`, `--no_face_detector`.
 
 Формат вывода — по одному JSON-объекту на строку:
 
@@ -476,6 +566,8 @@ pip install -e .
 
 ### 2. Download pretrained weights
 
+> Needed **only for training from scratch**. For inference/evaluation from a trained `.ckpt` you can skip this step — the checkpoint already contains all weights (the swin/ME-GraphAU `.pth` files are loaded only if present).
+
 Interactive script to download FAU and backbone weights:
 
 ```bash
@@ -772,6 +864,8 @@ pip install -e .
 ```
 
 ### 2. Загрузка предобученных весов
+
+> Нужно **только для обучения с нуля**. Для инференса/оценки по обученному `.ckpt` этот шаг можно пропустить — чекпоинт уже содержит все веса (файлы swin/ME-GraphAU `.pth` загружаются только при наличии).
 
 Интерактивный скрипт для скачивания весов FAU и backbone:
 

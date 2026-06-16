@@ -606,8 +606,16 @@ def swin_transformer_tiny(pretrained=True, **kwargs):
     model = SwinTransformer(embed_dim=96,depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  window_size=7,drop_path_rate=0.2, **kwargs)
     if pretrained:
-        model.load_state_dict(torch.load(os.path.join(models_dir, model_name['swin_transformer_tiny']),
-                                         map_location='cuda' if torch.cuda.is_available() else 'cpu')['model'], strict=False)
+        # ImageNet-веса нужны только для обучения с нуля. При инференсе по полному
+        # чекпоинту (load_from_checkpoint) эти веса всё равно перезаписываются,
+        # поэтому отсутствие файла не должно ломать построение модели.
+        ckpt_file = os.path.join(models_dir, model_name['swin_transformer_tiny'])
+        if os.path.exists(ckpt_file):
+            model.load_state_dict(torch.load(ckpt_file,
+                                             map_location='cuda' if torch.cuda.is_available() else 'cpu')['model'], strict=False)
+        else:
+            print(f"⚠️  ImageNet-веса swin не найдены ({ckpt_file}) — пропуск. "
+                  f"Это нормально при инференсе по обученному чекпоинту; для обучения с нуля скачайте их (bash env.sh).")
     return model
 
 
