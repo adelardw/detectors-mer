@@ -1,4 +1,4 @@
-# deepfake-multimodal-recognition
+# multimodal-deepfake-recognition rppg + fau
 
 Мультимодальный детектор дипфейков на основе физиологических (rPPG) и мимических (FAU) признаков.
 
