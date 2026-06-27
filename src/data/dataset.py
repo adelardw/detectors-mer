@@ -197,6 +197,80 @@ class VideoFolderDataset(Dataset):
         return video_tensor, label
 
 
+class FrameFolderDataset(Dataset):
+    """Pre-cropped face frames stored per clip (e.g. GenD preproc subsample).
+
+    Layout:  root/<class_name>/<clip_id>/frame_XXXX.png
+    Classes come from sorted subdir names → fake=0, real=1 (matches
+    VideoFolderDataset and MetaVideoDataset.DEFAULT_TARGET_MAP).
+
+    Frames are ALREADY face-cropped, so NO FaceDetector is applied — the
+    video_transform is run directly on the loaded PIL frames. Returns the same
+    (video_tensor [C,T,H,W], label) as VideoFolderDataset, so it can be mixed
+    with it via ConcatDataset.
+
+    Note: these frames are subsampled (irregular stride) → the rPPG temporal
+    signal is unreliable; intended for use with the rPPG encoder frozen.
+    """
+
+    IMG_EXT = (".png", ".jpg", ".jpeg", ".bmp")
+
+    def __init__(self, root_dir, video_transform=None, frames_per_video=64):
+        if video_transform is None:
+            raise ValueError("FrameFolderDataset requires a video_transform")
+        if not os.path.exists(root_dir):
+            raise FileNotFoundError(f"Folder {root_dir} not found")
+        self.root_dir = root_dir
+        self.video_transform = video_transform
+        self.frames_per_video = frames_per_video
+
+        self.samples = []
+        self.classes = []
+        self.class_to_idx = {}
+        subdirs = sorted(d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d)))
+        for idx, class_name in enumerate(subdirs):
+            self.classes.append(class_name)
+            self.class_to_idx[class_name] = idx
+            class_dir = os.path.join(root_dir, class_name)
+            for clip in sorted(os.listdir(class_dir)):
+                clip_dir = os.path.join(class_dir, clip)
+                if os.path.isdir(clip_dir):
+                    self.samples.append((clip_dir, idx))
+        print(f"FrameFolderDataset: {len(self.samples)} clips in {root_dir} (classes {subdirs})")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def _dummy(self):
+        return [Image.new("RGB", (224, 224)) for _ in range(self.frames_per_video)]
+
+    def _load_frames(self, clip_dir):
+        files = sorted(f for f in os.listdir(clip_dir) if f.lower().endswith(self.IMG_EXT))
+        if not files:
+            return self._dummy()
+        n = len(files)
+        clip_len = self.frames_per_video
+        # Evenly sample clip_len frames, preserving temporal order; pad by cycling.
+        if n >= clip_len:
+            idxs = np.linspace(0, n - 1, clip_len).astype(int)
+            sel = [files[i] for i in idxs]
+        else:
+            sel = files + [files[i % n] for i in range(clip_len - n)]
+        frames = []
+        for f in sel:
+            try:
+                frames.append(Image.open(os.path.join(clip_dir, f)).convert("RGB"))
+            except Exception as e:
+                print(f"Ошибка чтения кадра {os.path.join(clip_dir, f)}: {e}")
+                frames.append(Image.new("RGB", (224, 224)))
+        return frames
+
+    def __getitem__(self, idx):
+        clip_dir, label = self.samples[idx]
+        frames = self._load_frames(clip_dir)
+        video_tensor = self.video_transform(frames)
+        return video_tensor, label
+
 
 def split_dataset(dataset, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
     assert abs((train_ratio + val_ratio + test_ratio) - 1.0) < 1e-5, "Need sum == 1"

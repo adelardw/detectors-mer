@@ -1,5 +1,7 @@
+import io
 import random
 import torch
+from PIL import Image
 from torchvision.transforms import RandomResizedCrop
 from torchvision.transforms import functional as TF
 
@@ -29,12 +31,21 @@ class VideoTransform:
         crop_ratio=(0.9, 1.1),
         crop_p=0.5,
         color_jitter_p=0.3,
-        brightness_range=0.1,
+        brightness_range=0.15,
         contrast_range=0.1,
         saturation_range=0.05,
-        blur_p=0.1,
+        blur_p=0.25,
         blur_kernel=5,
         blur_sigma=(0.1, 2.0),
+        # Robustness to low-res / webcam / 640x480 inputs (Huawei consumer-video domain).
+        # downscale: shrink the crop then upscale back, simulating small faces after
+        # detection on low-res video. jpeg: re-encode to simulate compression artifacts.
+        # Both use ONE random parameter per clip → constant across frames, so the rPPG
+        # temporal color signal is preserved (same constraint as the color jitter above).
+        downscale_p=0.3,
+        downscale_min=0.25,
+        jpeg_p=0.3,
+        jpeg_quality=(30, 75),
     ):
         self.size = size
         self.training = training
@@ -49,6 +60,10 @@ class VideoTransform:
         self.blur_p = blur_p
         self.blur_kernel = blur_kernel
         self.blur_sigma = blur_sigma
+        self.downscale_p = downscale_p
+        self.downscale_min = downscale_min
+        self.jpeg_p = jpeg_p
+        self.jpeg_quality = jpeg_quality
 
     def __call__(self, frames: list) -> torch.Tensor:
         """
@@ -102,6 +117,15 @@ class VideoTransform:
         if do_blur:
             sigma = random.uniform(*self.blur_sigma)
 
+        do_downscale = random.random() < self.downscale_p
+        if do_downscale:
+            frac = random.uniform(self.downscale_min, 0.7)
+            ds = max(8, int(self.size[0] * frac))
+
+        do_jpeg = random.random() < self.jpeg_p
+        if do_jpeg:
+            jq = random.randint(self.jpeg_quality[0], self.jpeg_quality[1])
+
         # --- apply consistently to every frame ---
         tensors = []
         for f in frames:
@@ -116,6 +140,14 @@ class VideoTransform:
                 f = TF.adjust_brightness(f, brightness_factor)
                 f = TF.adjust_contrast(f, contrast_factor)
                 f = TF.adjust_saturation(f, saturation_factor)
+            if do_downscale:
+                f = TF.resize(f, [ds, ds])
+                f = TF.resize(f, list(self.size))
+            if do_jpeg:
+                buf = io.BytesIO()
+                f.save(buf, format="JPEG", quality=jq)
+                buf.seek(0)
+                f = Image.open(buf).convert("RGB")
             if do_blur:
                 f = TF.gaussian_blur(f, kernel_size=self.blur_kernel, sigma=sigma)
 
