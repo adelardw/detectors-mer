@@ -11,7 +11,7 @@ from typing import List, Optional
 from collections import Counter
 from dotenv import load_dotenv
 from src.models.rppg_p_fau_df_lightning import FauRPPGDeepFakeRecognizerDF
-from src.data.dataset import VideoFolderDataset, split_dataset, grouped_split_indices
+from src.data.dataset import VideoFolderDataset, split_dataset, grouped_split_indices, FrameFolderDataset
 from src.data.meta_dataset import MetaVideoDataset
 from src.data.transforms import VideoTransform
 from src.data.processor import FaceDetector, Processor
@@ -82,6 +82,21 @@ def train(
         help="Сплит как до 2026-06-12: несортированный os.walk + randperm по файлам. "
              "Аугментации одного ролика могут попасть и в train, и в test (лик) — "
              "только для воспроизведения старых экспериментов."
+    ),
+    frame_dataset_paths: Optional[List[str]] = typer.Option(
+        None, "--frame_dataset_path", "-fd",
+        help="Папки с frame-folder датасетами (root/<class>/<clip>/frame.png — GenD preproc). "
+             "Кадры читаются напрямую без MTCNN; добавляются ЦЕЛИКОМ в train."
+    ),
+    init_weights: Optional[str] = typer.Option(
+        None, "--init_weights", "-iw",
+        help="Загрузить ТОЛЬКО веса из .ckpt (свежий оптимизатор/LR-расписание), без полного resume (-r). "
+             "Для дообучения от лучших весов."
+    ),
+    freeze_rppg: bool = typer.Option(
+        False, "--freeze_rppg",
+        help="Заморозить rPPG-энкодер (phys_encoder). Нужно при дообучении на frame-folder данных "
+             "(прорежённые кадры → пульсовой сигнал битый)."
     ),
 ):
     """
@@ -314,6 +329,21 @@ def train(
             test_ds  = Subset(full_val_dataset,   test_idx)
             typer.echo(f"Random split → Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
 
+    # ── Frame-folder датасеты (GenD preproc) — добавляются ЦЕЛИКОМ в train ─────
+    frame_train_datasets = []
+    if frame_dataset_paths:
+        for p in frame_dataset_paths:
+            if os.path.exists(p):
+                typer.echo(f"🖼️  Загрузка frame-folder датасета: {p}")
+                frame_train_datasets.append(
+                    FrameFolderDataset(p, video_transform=train_transform, frames_per_video=num_frames)
+                )
+            else:
+                typer.echo(f"⚠️ frame-folder не найден: {p}")
+        if frame_train_datasets:
+            train_ds = ConcatDataset([train_ds] + frame_train_datasets)
+            typer.echo(f"➕ frame-folder в train → итого {len(train_ds)} клипов")
+
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
         num_workers=num_workers, pin_memory=True,
@@ -329,8 +359,19 @@ def train(
     )
 
 
-    # ── Class weights (only for meta CSV mode) ───────────────────────────────
+    # ── Class weights ────────────────────────────────────────────────────────
     class_weights = None
+    if not use_meta:
+        # Folder + frame-folder mode: balance fake/real (важно при перекосе fake из GenD).
+        folder_lbls = [int(lbl) for ds in train_datasets for _, lbl in ds.samples]
+        frame_lbls  = [int(lbl) for ds in frame_train_datasets for _, lbl in ds.samples]
+        all_lbls = folder_lbls + frame_lbls
+        if all_lbls:
+            class_weights = {"main": _class_weights(all_lbls, 2)}
+            typer.echo(
+                f"⚖️  Class weights (folder+frame): {class_weights['main'].numpy().round(3).tolist()} "
+                f"| fake={all_lbls.count(0)} real={all_lbls.count(1)}"
+            )
     if use_meta and train_datasets:
         all_labels     = [int(lbl) for ds in train_datasets for _, lbl in ds.samples]
         all_gender     = [v for ds in train_datasets for v in ds._gender]
@@ -354,6 +395,19 @@ def train(
         model_params=model_cfg,
         class_weights=class_weights,
         **train_cfg)
+
+    if init_weights:
+        if not os.path.exists(init_weights):
+            raise FileNotFoundError(init_weights)
+        typer.echo(f"⬇️  Загрузка ТОЛЬКО весов из {init_weights} (свежий оптимизатор/LR)")
+        sd = torch.load(init_weights, map_location="cpu")["state_dict"]
+        missing, unexpected = lit_model.load_state_dict(sd, strict=False)
+        typer.echo(f"   загружено: missing={len(missing)} unexpected={len(unexpected)}")
+
+    if freeze_rppg:
+        for par in lit_model.model.phys_encoder.parameters():
+            par.requires_grad = False
+        typer.echo("❄️  rPPG-энкодер (phys_encoder) заморожен — обучаются FAU+fusion+pooler+голова.")
 
     print("\n🔍 CHECKING TRAINABLE PARAMS:")
     trainable_layers = []
