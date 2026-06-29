@@ -83,6 +83,11 @@ def evaluate(
              "Обязателен для чекпоинтов, обученных старым train.py (например exp_120626), "
              "иначе сплит не совпадёт с обучением."
     ),
+    threshold: Optional[float] = typer.Option(
+        None, "--threshold", "-t",
+        help="Порог по P(fake): предсказать fake(0) если P(fake)>=threshold, иначе real(1). "
+             "По умолчанию (None) — argmax (≈0.5). AUROC от порога не зависит."
+    ),
 ):
     """
     Evaluate a trained FauRPPGDeepFakeRecognizer.
@@ -257,16 +262,19 @@ def evaluate(
 
             total_loss += criterion(logits, y).item()
 
-            acc_m.update(logits, y)
-            f1_m.update(logits, y)
-            prec_m.update(logits, y)
-            rec_m.update(logits, y)
-            auroc_m.update(probs, y)
-            cm_m.update(logits, y)
-            pc_acc.update(logits, y)
-            pc_f1.update(logits, y)
-            pc_prec.update(logits, y)
-            pc_rec.update(logits, y)
+            # Предсказание класса: argmax по умолчанию, либо порог по P(fake) при --threshold.
+            cls = logits if threshold is None else torch.where(probs[:, 0] >= threshold, 0, 1)
+
+            acc_m.update(cls, y)
+            f1_m.update(cls, y)
+            prec_m.update(cls, y)
+            rec_m.update(cls, y)
+            auroc_m.update(probs, y)   # AUROC от порога не зависит
+            cm_m.update(cls, y)
+            pc_acc.update(cls, y)
+            pc_f1.update(cls, y)
+            pc_prec.update(cls, y)
+            pc_rec.update(cls, y)
 
             if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(eval_loader):
                 typer.echo(f"  [{batch_idx + 1}/{len(eval_loader)}]")
@@ -312,6 +320,7 @@ def evaluate(
         results = {
             "checkpoint": ckpt_path,
             "config": config_path,
+            "threshold": threshold if threshold is not None else "argmax(0.5)",
             "num_samples": len(eval_ds),
             "loss": avg_loss,
             "accuracy": acc,

@@ -24,7 +24,14 @@ def _worker_init_fn(worker_id: int) -> None:
     Without this, all forked workers inherit the same numpy state from the parent
     process → correlated np.random.randint calls → same start_frame chosen for
     videos of equal length across workers → loss of temporal diversity.
+
+    Also disables OpenCV's internal thread pool: after fork() in DataLoader
+    workers it can busy-spin (workers stuck at ~90% CPU, no batches produced,
+    GPU idle, training hangs). cv2.setNumThreads(0) is the standard fix.
     """
+    import cv2
+    cv2.setNumThreads(0)
+    torch.set_num_threads(1)   # 1 поток на воркер: 7 воркеров × 1 = 7 ядер чисто, без oversubscription (было 64 потока на 8 ядрах → толкотня)
     seed = torch.initial_seed() % (2 ** 32)
     np.random.seed(seed)
     _random.seed(seed)
@@ -332,11 +339,14 @@ def train(
     # ── Frame-folder датасеты (GenD preproc) — добавляются ЦЕЛИКОМ в train ─────
     frame_train_datasets = []
     if frame_dataset_paths:
+        # GenD-кадры УЖЕ кропнуты (x1.3) → БЕЗ MTCNN-детектора: голый VideoTransform
+        # (training=True, поэтому аугментации downscale/jpeg/blur применяются).
+        frame_transform = VideoTransform(size=(224, 224), training=True)
         for p in frame_dataset_paths:
             if os.path.exists(p):
-                typer.echo(f"🖼️  Загрузка frame-folder датасета: {p}")
+                typer.echo(f"🖼️  Загрузка frame-folder датасета (без MTCNN): {p}")
                 frame_train_datasets.append(
-                    FrameFolderDataset(p, video_transform=train_transform, frames_per_video=num_frames)
+                    FrameFolderDataset(p, video_transform=frame_transform, frames_per_video=num_frames)
                 )
             else:
                 typer.echo(f"⚠️ frame-folder не найден: {p}")
@@ -407,7 +417,9 @@ def train(
     if freeze_rppg:
         for par in lit_model.model.phys_encoder.parameters():
             par.requires_grad = False
-        typer.echo("❄️  rPPG-энкодер (phys_encoder) заморожен — обучаются FAU+fusion+pooler+голова.")
+        lit_model._freeze_rppg = True          # train() override держит phys_encoder в eval()
+        lit_model.model.phys_encoder.eval()    # сразу в eval: без дрейфа _WidthBN/Dropout на GenD-кадрах
+        typer.echo("❄️  rPPG-энкодер заморожен: requires_grad=False + eval() (без дрейфа BN/Dropout). Учатся FAU+fusion+pooler+голова.")
 
     print("\n🔍 CHECKING TRAINABLE PARAMS:")
     trainable_layers = []

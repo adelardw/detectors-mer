@@ -66,7 +66,7 @@ python run.py \
     -o prediction.jsonl
 ```
 
-Options: `-c` config (default `src/experiments/base_config.yml`), `-bs` batch size (default 8), `-nw` workers (default 4), `--no_face_detector` to disable the MTCNN face crop. CUDA is used automatically if available, otherwise CPU.
+Options: `-c` config (default `src/experiments/base_config.yml`), `-bs` batch size (default 8), `-nw` workers (default 4), `--no_face_detector` to disable the MTCNN face crop, `--threshold/-t` to decide by `P(fake) ≥ t` instead of argmax (default: argmax ≈ 0.5). CUDA is used automatically if available, otherwise CPU.
 
 ### Web demo — player + JSON
 
@@ -146,7 +146,7 @@ python run.py \
     -o prediction.jsonl
 ```
 
-Опции: `-c` конфиг (по умолчанию `src/experiments/base_config.yml`), `-bs` размер батча (по умолчанию 8), `-nw` воркеры (по умолчанию 4), `--no_face_detector` — отключить кроп лица MTCNN. CUDA используется автоматически при наличии, иначе CPU.
+Опции: `-c` конфиг (по умолчанию `src/experiments/base_config.yml`), `-bs` размер батча (по умолчанию 8), `-nw` воркеры (по умолчанию 4), `--no_face_detector` — отключить кроп лица MTCNN, `--threshold/-t` — решать по `P(fake) ≥ t` вместо argmax (по умолчанию argmax ≈ 0.5). CUDA используется автоматически при наличии, иначе CPU.
 
 ### Веб-демо — плеер + JSON
 
@@ -674,6 +674,12 @@ Save results to JSON:
 python evaluate.py ... -o results.json
 ```
 
+Decision threshold: by default the predicted class is `argmax` (≈0.5). Pass `--threshold/-t` to instead predict `fake` when `P(fake) ≥ t` (AUROC is threshold-independent). Useful for calibration — e.g. the mixed-data fine-tune tends to over-flag `fake` at 0.5, and `-t 0.75…0.8` rebalances. **Calibrate the threshold on a separate val set, not on the test set.**
+
+```bash
+python evaluate.py -c src/experiments/base_config.yml -ckpt best.ckpt -mc val.csv -t 0.8 -o results.json
+```
+
 ## Notes
 
 - This is a **research codebase**, not a production package.
@@ -965,6 +971,12 @@ python evaluate.py -c src/experiments/base_config.yml \
 
 ```bash
 python evaluate.py ... -o results.json
+```
+
+Порог решения: по умолчанию класс берётся через `argmax` (≈0.5). Флаг `--threshold/-t` заставляет предсказывать `fake` при `P(fake) ≥ t` (AUROC от порога не зависит). Полезно для калибровки — дотюн на смеси склонен перекосить в `fake` при 0.5, а `-t 0.75…0.8` выравнивает. **Калибровать порог на отдельной val-выборке, не на тесте.**
+
+```bash
+python evaluate.py -c src/experiments/base_config.yml -ckpt best.ckpt -mc val.csv -t 0.8 -o results.json
 ```
 
 ## Примечания

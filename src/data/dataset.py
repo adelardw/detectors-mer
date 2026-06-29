@@ -6,6 +6,22 @@ from PIL import Image
 import cv2
 import numpy as np
 
+# OpenCV's internal thread pool busy-spins after fork() in DataLoader workers
+# (workers stuck ~90% CPU, no batches, GPU idle, training hangs on corrupt H.264).
+# Disable it process-wide; forked workers inherit this. Standard fix for cv2+DataLoader.
+cv2.setNumThreads(0)
+
+import signal
+import threading
+
+
+class _VideoReadTimeout(Exception):
+    """Raised by SIGALRM when a video read exceeds its time budget (corrupt H.264)."""
+
+
+def _video_alarm_handler(signum, frame):
+    raise _VideoReadTimeout()
+
 class RecursiveFolderDataset(Dataset):
     """
     for ff++ and celebDF
@@ -141,43 +157,60 @@ class VideoFolderDataset(Dataset):
         return [Image.new('RGB', (224, 224)) for _ in range(self.frames_per_video)]
 
     def _load_video(self, path):
-        cap = cv2.VideoCapture(path)
-        
-        if not cap.isOpened():
-            print(f"Error opening {path}")
-            return self._get_dummy_video()
+        # SIGALRM timeout bounds hangs on corrupt H.264 (cv2.read can spin forever
+        # in C; the signal interrupts even a blocking C call). Only arms in the
+        # worker's main thread (where __getitem__ runs); otherwise reads as before.
+        use_alarm = threading.current_thread() is threading.main_thread()
+        if use_alarm:
+            old_handler = signal.signal(signal.SIGALRM, _video_alarm_handler)
+            signal.alarm(45)
+        cap = None
+        try:
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                print(f"Error opening {path}")
+                return self._get_dummy_video()
 
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames <= 0:
-            cap.release()
-            return self._get_dummy_video()
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if total_frames <= 0:
+                return self._get_dummy_video()
 
-        clip_len = self.frames_per_video
-        
-        if total_frames > clip_len:
-            start_frame = np.random.randint(0, total_frames - clip_len)
-        else:
-            start_frame = 0
-
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        
-        frames = []
-        for _ in range(clip_len):
-            ret, frame = cap.read()
-            if ret:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames.append(Image.fromarray(frame))
+            clip_len = self.frames_per_video
+            if total_frames > clip_len:
+                start_frame = np.random.randint(0, total_frames - clip_len)
             else:
-                break
-        cap.release()
+                start_frame = 0
 
-        if len(frames) == 0: return self._get_dummy_video()
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-        original_len = len(frames)
-        while len(frames) < clip_len:
-            frames.append(frames[len(frames) % original_len])
-            
-        return frames[:clip_len]
+            frames = []
+            for _ in range(clip_len):
+                ret, frame = cap.read()
+                if ret:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frames.append(Image.fromarray(frame))
+                else:
+                    break
+
+            if len(frames) == 0:
+                return self._get_dummy_video()
+
+            original_len = len(frames)
+            while len(frames) < clip_len:
+                frames.append(frames[len(frames) % original_len])
+            return frames[:clip_len]
+        except _VideoReadTimeout:
+            print(f"⏱️  TIMEOUT — пропускаю битое видео: {path}")
+            return self._get_dummy_video()
+        except Exception as e:
+            print(f"Ошибка чтения {path}: {e}")
+            return self._get_dummy_video()
+        finally:
+            if cap is not None:
+                cap.release()
+            if use_alarm:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
 
     def __getitem__(self, idx):
         path, label = self.samples[idx]

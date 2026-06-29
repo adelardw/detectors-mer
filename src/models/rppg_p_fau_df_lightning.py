@@ -173,6 +173,20 @@ class FauRPPGDeepFakeRecognizerDF(pl.LightningModule):
     def forward(self, x):
         return self.model(x, return_info=False)
 
+    def train(self, mode: bool = True):
+        """Override: keep the rPPG encoder in eval() when frozen.
+
+        requires_grad=False stops weight updates but does NOT freeze the rPPG
+        encoder's custom _WidthBN running stats / Dropout — those depend on
+        module.training, which Lightning sets back to True every epoch. Without
+        this override the "frozen" rPPG branch would still drift on the
+        (temporally degraded) frame-folder data, defeating the purpose.
+        """
+        super().train(mode)
+        if getattr(self, "_freeze_rppg", False):
+            self.model.phys_encoder.eval()
+        return self
+
     # ── Training ──────────────────────────────────────────────────────────
 
     def training_step(self, batch, batch_idx):

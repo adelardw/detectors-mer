@@ -161,6 +161,10 @@ def run(
     batch_size: int = typer.Option(8, "--batch_size", "-bs"),
     num_workers: int = typer.Option(4, "--num_workers", "-nw"),
     no_face_detector: bool = typer.Option(False, "--no_face_detector", help="Отключить MTCNN-детектор лиц в препроцессинге"),
+    threshold: Optional[float] = typer.Option(
+        None, "--threshold", "-t",
+        help="Порог по P(fake): метка fake если P(fake)>=threshold, иначе real. По умолчанию (None) — argmax (≈0.5)."
+    ),
 ):
     """Прогнать чекпоинт на папке видео и сохранить вероятности классов в JSONL."""
     if not os.path.exists(ckpt_path):
@@ -210,7 +214,11 @@ def run(
             x = x.to(device)
             logits = model(x)
             probs = F.softmax(logits, dim=1).cpu()
-            preds = probs.argmax(dim=1)
+            # argmax по умолчанию; при --threshold: fake(0) если P(fake)>=thr, иначе real(1)
+            if threshold is None:
+                preds = probs.argmax(dim=1)
+            else:
+                preds = torch.where(probs[:, 0] >= threshold, 0, 1)
 
             for i, rel in enumerate(rels):
                 pid = int(preds[i])
