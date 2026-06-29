@@ -118,7 +118,7 @@ def grouped_split_indices(paths, train_ratio=0.7, val_ratio=0.15, seed=42):
 class VideoFolderDataset(Dataset):
     def __init__(self, root_dir, transform=None, video_transform=None,
                  valid_extensions=('.mp4', '.avi', '.mov', '.mkv'), frames_per_video=32,
-                 sort_files=True):
+                 sort_files=True, deterministic=False):
         self.root_dir = root_dir
         self.transform = transform
         self.video_transform = video_transform
@@ -127,6 +127,8 @@ class VideoFolderDataset(Dataset):
         # sort_files=False — порядок os.walk как до 2026-06-12, нужен только
         # для воспроизведения сплита старых чекпоинтов (--legacy_split).
         self.sort_files = sort_files
+        # deterministic=True → центр-сэмпл для стабильной оценки (без шума случайного старта).
+        self.deterministic = deterministic
 
         self.samples = []
         self.classes = []
@@ -177,7 +179,8 @@ class VideoFolderDataset(Dataset):
 
             clip_len = self.frames_per_video
             if total_frames > clip_len:
-                start_frame = np.random.randint(0, total_frames - clip_len)
+                start_frame = max(0, (total_frames - clip_len) // 2) if self.deterministic \
+                    else np.random.randint(0, total_frames - clip_len)
             else:
                 start_frame = 0
 

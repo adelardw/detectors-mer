@@ -1,12 +1,16 @@
 import json
 import os
+import cv2
 import torch
 import torch.nn.functional as F
 import typer
+from PIL import Image
 from omegaconf import OmegaConf
 from typing import List, Optional
 from dotenv import load_dotenv
 from torch.utils.data import DataLoader, ConcatDataset, Subset
+
+cv2.setNumThreads(0)
 
 #from src.models.rppg_p_fau_lightning import FauRPPGDeepFakeRecognizer
 from src.models.rppg_p_fau_df_lightning import FauRPPGDeepFakeRecognizerDF
@@ -26,6 +30,37 @@ from torchmetrics.classification import (
 
 load_dotenv()
 app = typer.Typer(pretty_exceptions_show_locals=False)
+
+
+def _read_frames(path, max_frames):
+    """Прочитать до max_frames кадров с начала ролика (как Huawei: ≤300)."""
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return []
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    n = min(total, max_frames) if total > 0 else max_frames
+    frames = []
+    for _ in range(n):
+        ret, fr = cap.read()
+        if not ret:
+            break
+        frames.append(Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)))
+    cap.release()
+    return frames
+
+
+def _collect_samples(ds):
+    """Достать плоский список (path, label) из Subset/ConcatDataset/Meta/VideoFolder."""
+    if isinstance(ds, Subset):
+        base = _collect_samples(ds.dataset)
+        return [base[i] for i in ds.indices]
+    if isinstance(ds, ConcatDataset):
+        out = []
+        for d in ds.datasets:
+            out += _collect_samples(d)
+        return out
+    return [(p, int(l)) for p, l in ds.samples]
+
 
 DEFAULT_MODEL_CFG = {
     "backbone_fau": "swin_transformer_tiny",
@@ -88,6 +123,16 @@ def evaluate(
         help="Порог по P(fake): предсказать fake(0) если P(fake)>=threshold, иначе real(1). "
              "По умолчанию (None) — argmax (≈0.5). AUROC от порога не зависит."
     ),
+    full_video: bool = typer.Option(
+        False, "--full_video", "-fv",
+        help="Прогон по ВСЕМУ ролику: скользящие окна по num_frames кадров → усреднить softmax "
+             "по окнам → один скор на видео. Стабильнее одно-клиповой оценки и ближе к realtime. "
+             "Без флага — одно центр-окно (как сейчас)."
+    ),
+    max_frames: int = typer.Option(
+        320, "--max_frames",
+        help="Сколько кадров читать с начала ролика в режиме --full_video (Huawei: ≤300)."
+    ),
 ):
     """
     Evaluate a trained FauRPPGDeepFakeRecognizer.
@@ -138,6 +183,7 @@ def evaluate(
         gender_col=gender_col,
         ethnicity_col=ethnicity_col,
         emotion_col=emotion_col,
+        deterministic=True,   # стабильная оценка: центр-сэмпл, без шума случайного старта кадров
     )
 
     class_names = None
@@ -158,7 +204,7 @@ def evaluate(
         for path in eval_dataset_paths:
             if os.path.exists(path):
                 typer.echo(f"  Загрузка: {path}")
-                datasets.append(VideoFolderDataset(path, video_transform=val_transform, frames_per_video=num_frames))
+                datasets.append(VideoFolderDataset(path, video_transform=val_transform, frames_per_video=num_frames, deterministic=True))
             else:
                 typer.echo(f"  Пропуск (не найден): {path}")
         if not datasets:
@@ -173,7 +219,7 @@ def evaluate(
         for path in dataset_paths:
             if os.path.exists(path):
                 typer.echo(f"  Загрузка: {path}")
-                datasets.append(VideoFolderDataset(path, video_transform=val_transform, frames_per_video=num_frames, sort_files=not legacy_split))
+                datasets.append(VideoFolderDataset(path, video_transform=val_transform, frames_per_video=num_frames, sort_files=not legacy_split, deterministic=True))
                 loaded_paths.append(path)
             else:
                 # Пропуск папки меняет конкатенацию → сплит перестаёт совпадать с train.py
@@ -250,36 +296,71 @@ def evaluate(
     criterion = torch.nn.CrossEntropyLoss()
     total_loss = 0.0
 
+    cls_metrics = (acc_m, f1_m, prec_m, rec_m, cm_m, pc_acc, pc_f1, pc_prec, pc_rec)
+
     typer.echo(f"\nЗапуск inference...")
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(eval_loader):
-            x, targets = batch
-            y = targets["label"].to(device) if isinstance(targets, dict) else targets.to(device)
-            x = x.to(device)
+    per_video = []   # [(prob_fake, label)] — чтобы свипать порог потом без пересчёта
+    n_padded = 0
+    if full_video:
+        # Весь ролик: окна по num_frames → усреднить softmax по окнам → один скор/видео.
+        samples = _collect_samples(eval_ds)
+        typer.echo(f"Режим full-video: {len(samples)} роликов, ≤{max_frames} кадров, окна по {num_frames}")
+        with torch.no_grad():
+            for i, (path, lbl) in enumerate(samples):
+                y = torch.tensor([int(lbl)], device=device)
+                frames = _read_frames(path, max_frames)
+                if not frames:
+                    typer.echo(f"  ⚠️ не прочитан: {path}")
+                    probs = torch.full((1, num_classes), 1.0 / num_classes, device=device)
+                else:
+                    clip = val_transform(frames).to(device)            # [C, T, H, W]
+                    T = clip.shape[1]
+                    if T >= num_frames:
+                        # окна по num_frames; хвост покрываем последним окном к концу (перекрытие),
+                        # чтобы каждое окно было из num_frames РЕАЛЬНЫХ кадров — без паддинга.
+                        starts = list(range(0, T - num_frames + 1, num_frames))
+                        if starts[-1] != T - num_frames:
+                            starts.append(T - num_frames)
+                        wins = [clip[:, s:s + num_frames] for s in starts]
+                    else:
+                        # ролик короче num_frames → цикл-паддинг (как и в обучении на коротких роликах)
+                        n_padded += 1
+                        idx = [k % T for k in range(num_frames)]
+                        wins = [clip[:, idx]]
+                    logits_w = lit_model(torch.stack(wins))            # [W, num_classes]
+                    probs = F.softmax(logits_w, dim=1).mean(0, keepdim=True)   # усреднили окна → [1, C]
+                total_loss += F.nll_loss(torch.log(probs.clamp_min(1e-9)), y).item()
+                per_video.append((round(float(probs[0, 0]), 6), int(lbl)))
+                cls = probs if threshold is None else torch.where(probs[:, 0] >= threshold, 0, 1)
+                for m in cls_metrics:
+                    m.update(cls, y)
+                auroc_m.update(probs, y)
+                if (i + 1) % 10 == 0 or (i + 1) == len(samples):
+                    typer.echo(f"  [{i + 1}/{len(samples)}]")
+        typer.echo(f"Коротких роликов (<{num_frames} кадров, цикл-паддинг): {n_padded}/{len(samples)}")
+        n_units = len(samples)
+    else:
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(eval_loader):
+                x, targets = batch
+                y = targets["label"].to(device) if isinstance(targets, dict) else targets.to(device)
+                x = x.to(device)
 
-            logits = lit_model(x)
-            probs = F.softmax(logits, dim=1)
+                logits = lit_model(x)
+                probs = F.softmax(logits, dim=1)
+                total_loss += criterion(logits, y).item()
 
-            total_loss += criterion(logits, y).item()
+                # argmax по умолчанию, либо порог по P(fake) при --threshold
+                cls = logits if threshold is None else torch.where(probs[:, 0] >= threshold, 0, 1)
+                for m in cls_metrics:
+                    m.update(cls, y)
+                auroc_m.update(probs, y)   # AUROC от порога не зависит
 
-            # Предсказание класса: argmax по умолчанию, либо порог по P(fake) при --threshold.
-            cls = logits if threshold is None else torch.where(probs[:, 0] >= threshold, 0, 1)
+                if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(eval_loader):
+                    typer.echo(f"  [{batch_idx + 1}/{len(eval_loader)}]")
+        n_units = len(eval_loader)
 
-            acc_m.update(cls, y)
-            f1_m.update(cls, y)
-            prec_m.update(cls, y)
-            rec_m.update(cls, y)
-            auroc_m.update(probs, y)   # AUROC от порога не зависит
-            cm_m.update(cls, y)
-            pc_acc.update(cls, y)
-            pc_f1.update(cls, y)
-            pc_prec.update(cls, y)
-            pc_rec.update(cls, y)
-
-            if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(eval_loader):
-                typer.echo(f"  [{batch_idx + 1}/{len(eval_loader)}]")
-
-    avg_loss = total_loss / max(len(eval_loader), 1)
+    avg_loss = total_loss / max(n_units, 1)
     acc  = acc_m.compute().item()
     f1   = f1_m.compute().item()
     prec = prec_m.compute().item()
@@ -320,7 +401,9 @@ def evaluate(
         results = {
             "checkpoint": ckpt_path,
             "config": config_path,
+            "eval_mode": f"full_video(≤{max_frames}f, окна по {num_frames})" if full_video else "single_clip(центр)",
             "threshold": threshold if threshold is not None else "argmax(0.5)",
+            "per_video_pfake_label": per_video,   # для свипа порога без пересчёта (label: fake=0, real=1)
             "num_samples": len(eval_ds),
             "loss": avg_loss,
             "accuracy": acc,

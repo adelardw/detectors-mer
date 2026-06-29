@@ -45,9 +45,12 @@ class MetaVideoDataset(Dataset):
         ethnicity_col: str | None = "ethnicity",
         emotion_col: str | None = "emotion",
         target_map: dict | None = None,
+        deterministic: bool = False,
     ):
         self.video_transform = video_transform
         self.frames_per_video = frames_per_video
+        # deterministic=True → центр-сэмпл (как run.py) для стабильной оценки без шума сэмплинга.
+        self.deterministic = deterministic
         self.root_dir = root_dir
 
         if target_map is None:
@@ -127,7 +130,11 @@ class MetaVideoDataset(Dataset):
             return self._get_dummy_video()
 
         clip_len = self.frames_per_video
-        start_frame = np.random.randint(0, max(total_frames - clip_len, 1)) if total_frames > clip_len else 0
+        if total_frames > clip_len:
+            start_frame = max(0, (total_frames - clip_len) // 2) if self.deterministic \
+                else np.random.randint(0, total_frames - clip_len)
+        else:
+            start_frame = 0
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
         frames = []
