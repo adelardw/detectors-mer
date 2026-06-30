@@ -350,14 +350,9 @@ if __name__ == "__main__":
     # print(f"Labels: {labels}")
 
 
-    #root_path = "/mnt/tank/scratch/dstoronkin/faigc_dataset/dataset/videos"
-    
-    root_path = "/mnt/tank/scratch/dstoronkin/ff++_videos_out"
+    # Point this at a folder laid out as root/<class_name>/<video>.mp4
+    root_path = "/path/to/videos"
 
-    import json
-    jsonn = '/mnt/tank/scratch/dstoronkin/ff++_videos_out/captions/results.json'
-    
-    #print(json.load(open(jsonn)))
     full_dataset = VideoFolderDataset(root_path, transform=data_transforms)
 
     print(f"Classes: {full_dataset.classes}")
